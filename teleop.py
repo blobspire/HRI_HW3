@@ -24,8 +24,9 @@ class KeyboardController:
                         ord("z"): np.array([0, 0, 0, 0, 0, 0, +1, 0]),  # open gripper
                         ord("x"): np.array([0, 0, 0, 0, 0, 0, -1, 0]),  # close gripper
                         ord("."): np.array([0, 0, 0, 0, 0, 0, 0, +1]),  # toggle
+                        ord(","): np.array([0, 0, 0, 0, 0, 0, 0, -1]),  # disable robot control
                         }
-
+    
     # read the keyboard inputs and convert them to robot actions
     # returns an array: [x, y, z, roll, pitch, yaw, gripper, toggle]
     def get_action(self):

@@ -16,6 +16,7 @@ def get_object_goals():
     banana_state = banana.get_state()
     bottle_state = bottle.get_state()
     goals = {}
+    # The arrays added on set up for correct grasp. Position is center so addition moves to graspable edge at top
     goals["box_position"] = box_state["position"] + np.array([0, 0, 0.05])
     goals["box_rotz"] = box_state["euler"][2] + np.pi/2
     goals["banana_position"] = banana_state["position"] + np.array([0, 0, -0.01])
@@ -86,18 +87,73 @@ teleop = KeyboardController()
 state = panda.get_state()
 target_position = state["ee-position"]
 target_quaternion = state['ee-quaternion']
+start_position = np.array(state["ee-position"]) # Initial position
+human_interaction_delay = 3.0 # seconds after which we consider the human to have stopped interacting
+time_till_robot_control = human_interaction_delay
+time_till_probs_print = 0.5 # seconds until we print the next probs
+robot_enabled = True
 while True:
     # update the target pose
     action = teleop.get_action()
+    # If human has interacted, reset time till robot control
+    if np.linalg.norm(action) > 0:
+        time_till_robot_control = human_interaction_delay
     human_position = target_position + action[0:3]
     human_quaternion = p.multiplyTransforms([0, 0, 0], p.getQuaternionFromEuler(action[3:6]),
                                                 [0, 0, 0], target_quaternion)[1]
     human_quaternion = np.array(human_quaternion)
 
     # share autonomy between human and robot
-    ### to implement: currently we just execute human action ###
-    target_position = human_position
-    target_quaternion = human_quaternion
+
+    # Predict the human goal
+    # distance from start to goal / (distance from start to current + distance from current to goal)
+    # Get current state
+    state = panda.get_state()
+    # Get current position
+    current_position = np.array(panda.get_state()["ee-position"])
+    # Get object goals (these are theta1, theta2, theta3)
+    goals = get_object_goals()
+    object_positions = np.array([goals["box_position"], goals["banana_position"], goals["bottle_position"]])
+    start_to_goal = np.linalg.norm(start_position - object_positions, axis=1)
+    start_to_current = np.linalg.norm(start_position - current_position)
+    current_to_goal = np.linalg.norm(current_position - object_positions, axis=1)
+    BETA = 12
+    probs = np.exp(BETA * start_to_goal) / (np.exp(BETA * start_to_current + BETA * current_to_goal)) # Purpose of beta: human isn't perfect so beta allows us to make things more or less deterministic.
+    # Normalize to convert to probabilities
+    probs = probs / np.sum(probs) # This is the theta probs that human wants to grab each object
+    # Only print probs every 0.5 seconds
+    time_till_probs_print -= control_dt
+    if time_till_probs_print <= 0:
+        time_till_probs_print = 0.5
+        print(f"Probs: {probs}")
+
+    # target_position like a from notes, human_position like a_h
+    # We have 'human_position' using teleop and 'get_object_actions' which returns 'action' (an array of actions for each object)
+    # Grab the robot action for the most likely object and then add to human_position
+    # Base alpha on whether human is interacting or not
+    if time_till_robot_control <= 0:
+        ALPHA = 1.0 # If no interaction, fully robot control
+    elif robot_enabled:
+        ALPHA = 0.3 # Tunable blending factor between 0 and 1 (0: fully human, 1: fully robot)
+    elif not robot_enabled:
+        ALPHA = 0.0 # If robot control disabled, fully human control
+    CONFIDENCE_THRESHOLD = 0.6
+    object_actions = get_object_actions(current_position, state["ee-euler"], goals)
+    max_index = np.argmax(probs)
+    most_likely_object_index = max_index if probs[max_index] > CONFIDENCE_THRESHOLD else -1
+    if (most_likely_object_index > -1):
+        robot_action = object_actions[list(object_actions.keys())[most_likely_object_index]]
+        blended_position = (1 - ALPHA) * human_position + ALPHA * robot_action[0]
+        blended_quaternion = (1 - ALPHA) * human_quaternion + ALPHA * robot_action[1]
+    else:
+        blended_position = human_position
+        blended_quaternion = human_quaternion
+    # get_object_actions returns tuple of position and quaternion
+    # Decrement time till robot control by sim step size
+    time_till_robot_control -= control_dt
+
+    target_position = blended_position
+    target_quaternion = blended_quaternion
 
     # impose workspace limit
     if target_position[2] < 0.02:
@@ -115,6 +171,12 @@ while True:
     # print when "." is pressed
     if action[7] == +1:
         print("button pressed")
+
+    # Disable/enable robot control if "," if pressed
+    if action[7] == -1:
+        robot_enabled = not robot_enabled
+        print(f"Robot control {'enabled' if robot_enabled else 'disabled'}")
+        time.sleep(0.25)
 
     # step simulation
     p.stepSimulation()
